@@ -468,6 +468,7 @@ This project supports extra GPIO debug via env vars (printed when `DEBUG=1`).
 - `GPIO_PULL_UP` (default `true`) – set `false` to disable internal pull-up
 - `GPIO_ACTIVE_STATE` (optional) – force active level: `high` or `low` (helps when diagnosing polarity)
 - `GPIO_BOUNCE_TIME` (default `0.1`) – set `0` to disable debounce
+- `GPIO_MIN_PULSE_INTERVAL` (default `0.03`) – additional software debounce (seconds) applied per input based on pulse spacing
 - `GPIO_ENQUEUE_EDGES` (default `rising`) – which edge counts as a pulse: `rising|falling|both`
 - `GPIO_LOG_EDGES` (default `both`) – which edges to log (diagnostic): `rising|falling|both`
 - `GPIO_POLL_DEBUG` (default `false`) – if `true`, starts a polling monitor that logs value changes
