@@ -248,7 +248,7 @@ verify:
 	@echo "✓ InfluxDB connection successful"
 	@echo "Checking required Python packages..."
 	@./venv/bin/python3 -c "import influxdb_client; import RPi.GPIO; print('OK')" 2>&1
-	if [ $$? -eq 0 ]; then \
+	@if [ $$? -eq 0 ]; then \
 		echo "✓ Python packages installed (influxdb-client, RPi.GPIO)"; \
 	else \
 		echo "❌ ERROR: Python packages not installed correctly!"; \
