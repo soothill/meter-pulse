@@ -1,0 +1,40 @@
+; PowerLogger systemd unit
+; Install to: /etc/systemd/system/powerlogger.service
+
+[Unit]
+Description=PowerLogger Meter Pulse Collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Enable extra debug logging inside power_pulse.py when needed.
+# Set to 1/true/yes/on to enable.
+# Default debug off; enable via make target or by setting DEBUG=1
+Environment=DEBUG=0
+
+# Run as root to ensure GPIO edge detection works on Debian/RPi kernels.
+User=root
+Group=root
+
+WorkingDirectory=/home/darren/meter-pulse
+
+# Use the venv interpreter so Python deps are isolated
+ExecStart=/home/darren/meter-pulse/venv/bin/python /home/darren/meter-pulse/power_pulse.py
+
+Restart=always
+RestartSec=3
+
+# Make logs visible via: journalctl -u powerlogger -f
+StandardOutput=journal
+StandardError=journal
+
+# EnvironmentFile is optional; power_pulse.py also loads .env from WorkingDirectory
+EnvironmentFile=-/home/darren/meter-pulse/.env
+
+# Avoid stdout buffering so journalctl shows logs immediately
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

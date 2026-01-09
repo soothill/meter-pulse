@@ -97,6 +97,19 @@ Verify everything is set up correctly:
 - Shows summary with clear status indicators (✓/❌)
 - Provides next steps if any component is missing
 
+### systemd service targets
+
+If GPIO edge detection fails when running as a normal user, run as a systemd service.
+
+- `make service-install` – installs `powerlogger.service` to `/etc/systemd/system/` and reloads systemd
+- `make service-start` – enables and starts the service
+- `make service-stop` – stops the service
+- `make service-restart` – restarts the service
+- `make service-status` – shows full service status
+- `make service-logs` – follows service logs (`journalctl -f`)
+- `make service-debug-on` – enables debug logging (sets `DEBUG=1` in the unit file, reinstalls, restarts)
+- `make service-debug-off` – disables debug logging (`DEBUG=0`)
+
 ### `make delete-buckets`
 Delete all PowerLogger buckets from InfluxDB with safety warnings:
 - Displays detailed warning listing all buckets and their data contents
@@ -152,15 +165,68 @@ The system includes several performance optimizations for high pulse rates:
 
 ## GPIO Configuration
 
-The system expects GPIO pins configured as follows:
+The system uses the modern **gpiozero** library for GPIO access and expects GPIO pins configured as follows:
 
 | Pin   | Type    | Purpose          |
 |-------|----------|-------------------|
-| 20     | RISING   | Import Power      |
-| 26     | RISING   | Export Power     |
-| 21     | RISING   | Generate Power   |
+| 20     | Button (RISING) | Import Power      |
+| 26     | Button (RISING) | Export Power     |
+| 21     | Button (RISING) | Generate Power   |
+
+**Note:** The application uses `gpiozero.Button` with `pull_up=True` and `bounce_time=0.1` for reliable pulse detection. This is the recommended approach for Raspberry Pi GPIO programming and provides better abstraction than the legacy RPi.GPIO library.
 
 ## Troubleshooting
+
+### GPIO / Raspberry Pi
+
+If you see errors like:
+
+```
+RuntimeError: Failed to add edge detection
+```
+
+This is usually caused by the chosen GPIO backend failing to register edge detection.
+This project uses **gpiozero** and will now explicitly try the most compatible backend
+first (RPi.GPIO), then fall back to lgpio.
+
+Quick checks:
+
+```bash
+ls -l /dev/gpiomem /dev/gpiochip0
+groups
+```
+
+You should be in the `gpio` group and `/dev/gpiomem` should be readable.
+
+Install OS packages (Raspberry Pi OS):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-gpiozero python3-rpi.gpio
+```
+
+Then log out/in after group changes.
+
+### Running as a systemd service (recommended)
+
+On some Debian/RPi kernel images, **GPIO edge detection works with `sudo` but fails as an unprivileged user**.
+In that case, run PowerLogger as a system service.
+
+This repo includes an example unit: `powerlogger.service`.
+
+Install and start:
+
+```bash
+sudo cp powerlogger.service /etc/systemd/system/powerlogger.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now powerlogger.service
+```
+
+View logs:
+
+```bash
+journalctl -u powerlogger.service -f
+```
 
 ### Connection Issues
 
@@ -385,6 +451,85 @@ The system expects GPIO pins configured as follows:
 | 20     | RISING   | Import Power      |
 | 26     | RISING   | Export Power     |
 | 21     | RISING   | Generate Power   |
+
+### GPIO debug / troubleshooting
+
+If you are not seeing pulses logged, it is usually one of:
+
+1) The **wrong edge** (your meter is active-low and you’re only listening for rising)
+2) The **wrong pull configuration** (`pull_up=True` vs `pull_up=False`)
+3) Edge callbacks not firing due to permissions/backend (less likely here since lgpio is used)
+
+This project supports extra GPIO debug via env vars (printed when `DEBUG=1`).
+
+**GPIO env vars**:
+
+- `GPIO_PULL` (preferred) – `up|down|none` to select internal pull configuration
+- `GPIO_PULL_UP` (default `true`) – set `false` to disable internal pull-up
+- `GPIO_ACTIVE_STATE` (optional) – force active level: `high` or `low` (helps when diagnosing polarity)
+- `GPIO_BOUNCE_TIME` (default `0.1`) – set `0` to disable debounce
+- `GPIO_ENQUEUE_EDGES` (default `rising`) – which edge counts as a pulse: `rising|falling|both`
+- `GPIO_LOG_EDGES` (default `both`) – which edges to log (diagnostic): `rising|falling|both`
+- `GPIO_POLL_DEBUG` (default `false`) – if `true`, starts a polling monitor that logs value changes
+- `GPIO_POLL_INTERVAL` (default `0.05`) – poll interval seconds
+- `GPIO_IMPORT_PIN`/`GPIO_EXPORT_PIN`/`GPIO_GENERATE_PIN` – override BCM pins (defaults 20/26/21)
+
+**Recommended debug runs**:
+
+Listen/log *both* edges and use poll monitor:
+
+```bash
+DEBUG=1 GPIO_LOG_EDGES=both GPIO_POLL_DEBUG=1 python3 power_pulse.py
+```
+
+If you see only **deactivated** edges firing, your pulse is likely active-low; switch pulse enqueueing:
+
+```bash
+DEBUG=1 GPIO_ENQUEUE_EDGES=falling python3 power_pulse.py
+```
+
+If your idle state looks wrong (e.g. always active), try flipping the pull-up:
+
+```bash
+DEBUG=1 GPIO_PULL_UP=false python3 power_pulse.py
+```
+
+**Active-low pulse tip (like your BCM20 result):**
+
+If the line idles HIGH and pulses LOW, you typically want:
+
+```bash
+DEBUG=1 GPIO_PULL=up GPIO_ENQUEUE_EDGES=falling GPIO_LOG_EDGES=both GPIO_BOUNCE_TIME=0 python3 power_pulse.py
+```
+
+Note: `GPIO_ACTIVE_STATE` only applies when `GPIO_PULL=none` (floating). If you use `GPIO_PULL=up|down`, the logger will ignore `GPIO_ACTIVE_STATE` to avoid gpiozero `PinInvalidState`.
+
+### Standalone GPIO test tool
+
+If you want to ignore Influx entirely and just confirm which pins are changing state, use:
+
+```bash
+python3 gpio_watch.py --pins 2-27 --pull up
+```
+
+Try different pull configurations:
+
+```bash
+python3 gpio_watch.py --pins 2-27 --pull up
+python3 gpio_watch.py --pins 2-27 --pull down
+python3 gpio_watch.py --pins 2-27 --pull none --active high
+python3 gpio_watch.py --pins 2-27 --pull none --active low
+```
+
+Or watch just the expected pins:
+
+```bash
+python3 gpio_watch.py --pins 20,21,26 --pull up
+```
+
+Notes:
+- Pin numbers are **BCM** numbers (gpiozero default), not physical header pin numbers.
+- The tool prints initial states, then prints both edge callbacks and polling-detected changes.
 
 ## Troubleshooting
 

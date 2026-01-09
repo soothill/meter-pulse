@@ -1,4 +1,6 @@
-.PHONY: help install setup-influxdb clean delete-buckets verify venv
+.PHONY: help install setup-influxdb clean delete-buckets verify venv \
+	service-install service-start service-stop service-restart service-status service-logs \
+	service-debug-on service-debug-off
 
 # Default target: display help
 help:
@@ -8,6 +10,12 @@ help:
 	@echo "  make help          - Show this help message"
 	@echo "  make install       - Install all required dependencies and set up Python environment"
 	@echo "  make setup-influxdb - Create InfluxDB buckets, tasks, and tokens using .env config"
+	@echo "  make service-install - Install systemd service (powerlogger.service)"
+	@echo "  make service-start   - Start the systemd service"
+	@echo "  make service-restart - Restart the systemd service"
+	@echo "  make service-logs    - Follow logs from the systemd service"
+	@echo "  make service-debug-on  - Enable debug logging (DEBUG=1) and restart service"
+	@echo "  make service-debug-off - Disable debug logging (DEBUG=0) and restart service"
 	@echo "  make delete-buckets - Delete all PowerLogger buckets (WARNING: irreversible)"
 	@echo "  make verify       - Verify everything is set up correctly"
 	@echo "  make clean         - Remove virtual environment"
@@ -96,12 +104,12 @@ install-python-packages:
 	@echo "Installing Python packages..."
 	@./venv/bin/pip install --upgrade pip setuptools wheel
 	@./venv/bin/pip install influxdb-client
-	@# Try to install RPi.GPIO, but handle non-Raspberry Pi systems gracefully
-	@if ./venv/bin/pip install RPi.GPIO 2>/dev/null; then \
-		echo "RPi.GPIO installed (Raspberry Pi detected)"; \
+	@# Try to install gpiozero, but handle non-Raspberry Pi systems gracefully
+	@if ./venv/bin/pip install gpiozero 2>/dev/null; then \
+		echo "gpiozero installed (Raspberry Pi detected)"; \
 	else \
-		echo "Note: RPi.GPIO not installed (not a Raspberry Pi)"; \
-		echo "The application will not work without RPi.GPIO on the target system"; \
+		echo "Note: gpiozero not installed (not a Raspberry Pi)"; \
+		echo "The application will run without GPIO support on non-Raspberry Pi systems"; \
 	fi
 	@echo "Python packages installed successfully"
 
@@ -247,13 +255,14 @@ verify:
 		fi'
 	@echo "✓ InfluxDB connection successful"
 	@echo "Checking required Python packages..."
-	@./venv/bin/python3 -c "import influxdb_client; import RPi.GPIO; print('OK')" 2>&1
+	@./venv/bin/python3 -c "import influxdb_client; print('OK')" 2>&1
 	@if [ $$? -eq 0 ]; then \
-		echo "✓ Python packages installed (influxdb-client, RPi.GPIO)"; \
+		echo "✓ Python packages installed (influxdb-client)"; \
 	else \
 		echo "❌ ERROR: Python packages not installed correctly!"; \
 		echo "Run 'make install' to install Python packages."; \
 	fi
+	@./venv/bin/python3 -c "import gpiozero; print('GPIO available')" 2>&1 || echo "Note: gpiozero not installed (GPIO support disabled on this system)"
 	@echo ""
 	@echo "Checking InfluxDB buckets..."
 	@bash -c 'source .env 2>/dev/null && for bucket in PowerLogger_raw PowerLogger_1m PowerLogger_5m PowerLogger_1h; do influx bucket find --name $$bucket --host $$INFLUX_HOST --token $$INFLUX_TOKEN --org $$INFLUX_ORG >/dev/null 2>&1 && echo "  ✓ $$bucket exists"; done'
@@ -271,3 +280,53 @@ verify:
 	@echo "You can now start PowerLogger with:"
 	@echo "  source venv/bin/activate"
 	@echo "  python3 power_pulse.py"
+
+# -------------------------
+# systemd service helpers
+# -------------------------
+
+service-install:
+	@echo "Installing systemd service..."
+	@sudo cp powerlogger.service /etc/systemd/system/powerlogger.service
+	@sudo systemctl daemon-reload
+	@echo "✓ Installed /etc/systemd/system/powerlogger.service"
+	@echo "Next: make service-start"
+
+service-start:
+	@echo "Starting powerlogger.service..."
+	@sudo systemctl enable --now powerlogger.service
+	@sudo systemctl --no-pager --full status powerlogger.service | head -n 30
+
+service-stop:
+	@echo "Stopping powerlogger.service..."
+	@sudo systemctl stop powerlogger.service
+	@sudo systemctl --no-pager --full status powerlogger.service | head -n 30 || true
+
+service-restart:
+	@echo "Restarting powerlogger.service..."
+	@# If the unit hasn't been installed yet, install it first
+	@if [ ! -f /etc/systemd/system/powerlogger.service ]; then \
+		echo "Service not installed yet; running make service-install first..."; \
+		$(MAKE) service-install; \
+	fi
+	@sudo systemctl restart powerlogger.service
+	@sudo systemctl --no-pager --full status powerlogger.service | head -n 30
+
+service-status:
+	@sudo systemctl --no-pager --full status powerlogger.service
+
+service-logs:
+	@echo "Following logs for powerlogger.service (Ctrl+C to stop)..."
+	@sudo journalctl -u powerlogger.service -f
+
+service-debug-on:
+	@echo "Enabling DEBUG=1 in powerlogger.service (requires reinstall + restart)..."
+	@sed -i 's/^Environment=DEBUG=.*/Environment=DEBUG=1/' powerlogger.service
+	@$(MAKE) service-install
+	@$(MAKE) service-restart
+
+service-debug-off:
+	@echo "Disabling DEBUG (set DEBUG=0) in powerlogger.service (requires reinstall + restart)..."
+	@sed -i 's/^Environment=DEBUG=.*/Environment=DEBUG=0/' powerlogger.service
+	@$(MAKE) service-install
+	@$(MAKE) service-restart

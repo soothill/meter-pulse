@@ -1,2 +1,12 @@
 # Environment variables with sensitive data
 .env
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Local runtime data
+queue/
+
+# Virtualenv
+venv/
