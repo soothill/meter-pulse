@@ -446,6 +446,7 @@ def _make_gpio_edge_handler(
     callback_edge: str,
     device,
     enqueue_on_physical_edges: set[str],
+    log_on_callback_edges: set[str],
     counters: dict,
     last_value_by_type: dict,
     last_pulse_mono_ns_by_type: dict,
@@ -499,10 +500,11 @@ def _make_gpio_edge_handler(
                         phys_edge = "falling"
                 last_value_by_type[pulse_type] = cur_val
 
-        gprint(
-            f"cb_edge={callback_edge} phys_edge={phys_edge} type={pulse_type} ts_ns={ts_ns} value={val} is_active={active} "
-            f"counts(act={counters.get(pulse_type + '_activated', 0)} deact={counters.get(pulse_type + '_deactivated', 0)})"
-        )
+        if callback_edge in log_on_callback_edges:
+            gprint(
+                f"cb_edge={callback_edge} phys_edge={phys_edge} type={pulse_type} ts_ns={ts_ns} value={val} is_active={active} "
+                f"counts(act={counters.get(pulse_type + '_activated', 0)} deact={counters.get(pulse_type + '_deactivated', 0)})"
+            )
 
         if phys_edge in enqueue_on_physical_edges:
             # Extra debounce / rate limit: reject pulses that arrive too soon for this input.
@@ -625,12 +627,20 @@ def main():
                 enqueue_edges_cfg = "rising"
             enqueue_on_physical_edges = {"rising"} if enqueue_edges_cfg == "rising" else {"falling"} if enqueue_edges_cfg == "falling" else {"rising", "falling"}
 
-            # Which edges should we LOG callbacks for?
-            # Default: both, so we can see what the pin is actually doing.
+
+            # Which gpiozero CALLBACK edges should we LOG? (diagnostic only)
+            # NOTE: callback edges are 'activated'/'deactivated' based on active_state,
+            # so they may not correspond to physical rising/falling.
             log_edges_cfg = os.getenv("GPIO_LOG_EDGES", "both").strip().lower()
             if log_edges_cfg not in {"rising", "falling", "both"}:
                 log_edges_cfg = "both"
-            log_edges = {"activated"} if log_edges_cfg == "rising" else {"deactivated"} if log_edges_cfg == "falling" else {"activated", "deactivated"}
+            log_on_callback_edges = (
+                {"activated"}
+                if log_edges_cfg == "rising"
+                else {"deactivated"}
+                if log_edges_cfg == "falling"
+                else {"activated", "deactivated"}
+            )
 
             # Additional software debounce / sanity rate limit (per input).
             # This is applied *even if* gpiozero bounce_time is 0.
@@ -689,77 +699,86 @@ def main():
                 f"pins: Import={import_pin} Export={export_pin} Generate={generate_pin}"
             )
 
-            # Attach callbacks. We *always* count/log selected edges; we only enqueue
-            # for GPIO_ENQUEUE_EDGES.
-            if "activated" in log_edges:
-                import_in.when_activated = _make_gpio_edge_handler(
-                    pulse_type="Import",
-                    callback_edge="activated",
-                    device=import_in,
-                    enqueue_on_physical_edges=enqueue_on_physical_edges,
-                    counters=gpio_counters,
-                    last_value_by_type=last_value_by_type,
-                    last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
-                    min_pulse_interval_ns=min_pulse_interval_ns,
-                    lock=gpio_state_lock,
-                )
-                export_in.when_activated = _make_gpio_edge_handler(
-                    pulse_type="Export",
-                    callback_edge="activated",
-                    device=export_in,
-                    enqueue_on_physical_edges=enqueue_on_physical_edges,
-                    counters=gpio_counters,
-                    last_value_by_type=last_value_by_type,
-                    last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
-                    min_pulse_interval_ns=min_pulse_interval_ns,
-                    lock=gpio_state_lock,
-                )
-                generate_in.when_activated = _make_gpio_edge_handler(
-                    pulse_type="Generate",
-                    callback_edge="activated",
-                    device=generate_in,
-                    enqueue_on_physical_edges=enqueue_on_physical_edges,
-                    counters=gpio_counters,
-                    last_value_by_type=last_value_by_type,
-                    last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
-                    min_pulse_interval_ns=min_pulse_interval_ns,
-                    lock=gpio_state_lock,
-                )
 
-            if "deactivated" in log_edges:
-                import_in.when_deactivated = _make_gpio_edge_handler(
-                    pulse_type="Import",
-                    callback_edge="deactivated",
-                    device=import_in,
-                    enqueue_on_physical_edges=enqueue_on_physical_edges,
-                    counters=gpio_counters,
-                    last_value_by_type=last_value_by_type,
-                    last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
-                    min_pulse_interval_ns=min_pulse_interval_ns,
-                    lock=gpio_state_lock,
-                )
-                export_in.when_deactivated = _make_gpio_edge_handler(
-                    pulse_type="Export",
-                    callback_edge="deactivated",
-                    device=export_in,
-                    enqueue_on_physical_edges=enqueue_on_physical_edges,
-                    counters=gpio_counters,
-                    last_value_by_type=last_value_by_type,
-                    last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
-                    min_pulse_interval_ns=min_pulse_interval_ns,
-                    lock=gpio_state_lock,
-                )
-                generate_in.when_deactivated = _make_gpio_edge_handler(
-                    pulse_type="Generate",
-                    callback_edge="deactivated",
-                    device=generate_in,
-                    enqueue_on_physical_edges=enqueue_on_physical_edges,
-                    counters=gpio_counters,
-                    last_value_by_type=last_value_by_type,
-                    last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
-                    min_pulse_interval_ns=min_pulse_interval_ns,
-                    lock=gpio_state_lock,
-                )
+            # IMPORTANT: Always attach BOTH callbacks regardless of GPIO_LOG_EDGES.
+            # When GPIO_ACTIVE_STATE is inverted (active-low), gpiozero's
+            # 'activated'/'deactivated' are not the same as physical rising/falling.
+            # If we attach only one callback we may never observe the physical edge.
+
+            import_in.when_activated = _make_gpio_edge_handler(
+                pulse_type="Import",
+                callback_edge="activated",
+                device=import_in,
+                enqueue_on_physical_edges=enqueue_on_physical_edges,
+                log_on_callback_edges=log_on_callback_edges,
+                counters=gpio_counters,
+                last_value_by_type=last_value_by_type,
+                last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
+                min_pulse_interval_ns=min_pulse_interval_ns,
+                lock=gpio_state_lock,
+            )
+            import_in.when_deactivated = _make_gpio_edge_handler(
+                pulse_type="Import",
+                callback_edge="deactivated",
+                device=import_in,
+                enqueue_on_physical_edges=enqueue_on_physical_edges,
+                log_on_callback_edges=log_on_callback_edges,
+                counters=gpio_counters,
+                last_value_by_type=last_value_by_type,
+                last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
+                min_pulse_interval_ns=min_pulse_interval_ns,
+                lock=gpio_state_lock,
+            )
+
+            export_in.when_activated = _make_gpio_edge_handler(
+                pulse_type="Export",
+                callback_edge="activated",
+                device=export_in,
+                enqueue_on_physical_edges=enqueue_on_physical_edges,
+                log_on_callback_edges=log_on_callback_edges,
+                counters=gpio_counters,
+                last_value_by_type=last_value_by_type,
+                last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
+                min_pulse_interval_ns=min_pulse_interval_ns,
+                lock=gpio_state_lock,
+            )
+            export_in.when_deactivated = _make_gpio_edge_handler(
+                pulse_type="Export",
+                callback_edge="deactivated",
+                device=export_in,
+                enqueue_on_physical_edges=enqueue_on_physical_edges,
+                log_on_callback_edges=log_on_callback_edges,
+                counters=gpio_counters,
+                last_value_by_type=last_value_by_type,
+                last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
+                min_pulse_interval_ns=min_pulse_interval_ns,
+                lock=gpio_state_lock,
+            )
+
+            generate_in.when_activated = _make_gpio_edge_handler(
+                pulse_type="Generate",
+                callback_edge="activated",
+                device=generate_in,
+                enqueue_on_physical_edges=enqueue_on_physical_edges,
+                log_on_callback_edges=log_on_callback_edges,
+                counters=gpio_counters,
+                last_value_by_type=last_value_by_type,
+                last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
+                min_pulse_interval_ns=min_pulse_interval_ns,
+                lock=gpio_state_lock,
+            )
+            generate_in.when_deactivated = _make_gpio_edge_handler(
+                pulse_type="Generate",
+                callback_edge="deactivated",
+                device=generate_in,
+                enqueue_on_physical_edges=enqueue_on_physical_edges,
+                log_on_callback_edges=log_on_callback_edges,
+                counters=gpio_counters,
+                last_value_by_type=last_value_by_type,
+                last_pulse_mono_ns_by_type=last_pulse_mono_ns_by_type,
+                min_pulse_interval_ns=min_pulse_interval_ns,
+                lock=gpio_state_lock,
+            )
 
             # Print initial states (super helpful for pull_up diagnosis)
             gprint(
